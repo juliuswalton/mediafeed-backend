@@ -1,0 +1,83 @@
+from django.http import JsonResponse
+from django.views import View
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from decouple import config
+
+
+class YouTubeUserVideos(View):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.api_key = config('YOUTUBE_API_KEY')
+        self.youtube = build('youtube', 'v3', developerKey=self.api_key)
+
+    def find_channel_by_custom_url(self, custom_url, max_results=10):
+        try:
+            resp = self.youtube.search().list(
+                q=custom_url,
+                part='id',
+                type='channel',
+                fields='items(id(kind,channelId))',
+                maxResults=max_results
+            ).execute()
+
+            ch = []
+            for item in resp['items']:
+                assert item['id']['kind'] == 'youtube#channel'
+                ch.append(item['id']['channelId'])
+
+            if not len(ch):
+                return None
+
+            resp = self.youtube.channels().list(
+                id=','.join(ch),
+                part='id,snippet',
+                fields='items(id,snippet(customUrl))',
+                maxResults=len(ch)
+            ).execute()
+
+            for item in resp['items']:
+                url = item['snippet'].get('customUrl')
+                if url is not None and url.lower() == custom_url.lower():
+                    assert item['id'] is not None
+                    return item['id']
+
+            return None
+
+        except HttpError as e:
+            return JsonResponse({"error": f'An HTTP error {e.resp.status} occurred: {e.content}'}, status=400)
+
+    def get(self, request, username):
+        try:
+            channel_id = self.find_channel_by_custom_url(username)
+            if channel_id is None:
+                return JsonResponse({"error": "No channel found for this username"}, status=404)
+        except HttpError as e:
+            return JsonResponse({"error": f'An HTTP error {e.resp.status} occurred: {e.content}'}, status=400)
+
+        request = self.youtube.search().list(
+            part='snippet',
+            channelId=channel_id,
+            maxResults=25,  # fetches 25 videos, adjust this as needed
+            type='video',  # to get only videos, not playlists or channels
+            order='date'  # to get the most recent videos
+        )
+        response = request.execute()
+
+        # Transform the data as needed
+        processed_data = self.process_data(response['items'])
+
+        return JsonResponse(processed_data, safe=False)
+
+    def process_data(self, data):
+        processed_data = []
+
+        for item in data:
+            video_data = {
+                'title': item['snippet']['title'],
+                'thumbnail': item['snippet']['thumbnails']['high']['url'],  # using the high resolution thumbnail
+                'link': f'https://www.youtube.com/watch?v={item["id"]["videoId"]}'
+            }
+            processed_data.append(video_data)
+
+        return processed_data
